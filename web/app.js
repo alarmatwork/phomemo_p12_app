@@ -1,0 +1,460 @@
+/* P12 Label Studio: block-based 12 mm label designer + Web Serial printing. */
+(function () {
+  const { HEAD_DOTS, DOTS_PER_MM } = P12;
+  const MARGIN = 6;              // unprintable-ish edge of the 12 mm tape, in dots
+  const BAND = HEAD_DOTS - 2 * MARGIN;
+  const GAP = 12;                // dots between blocks
+  const FONTS = ["Inter", "Bebas Neue", "Space Grotesk", "Roboto Slab", "Pacifico", "Caveat", "Space Mono", "Permanent Marker"];
+  const STORE = "p12-studio-v1";
+
+  const $ = (s, el = document) => el.querySelector(s);
+  const h = (tag, props = {}, ...kids) => {
+    const el = Object.assign(document.createElement(tag), props);
+    for (const k of kids) el.append(k);
+    return el;
+  };
+
+  const defaultDesign = () => ({
+    label: { lengthMode: "auto", length: 40, frame: "rounded", invert: false, pad: 2, threshold: 128 },
+    blocks: [{ type: "icon", name: "heart", scale: 100, invert: false },
+             { type: "text", text: "Hello P12", font: "Inter", bold: true, italic: false, size: 0 }],
+  });
+  const settings = { copies: 1, density: 2, mirror: false };
+
+  let design = load() || defaultDesign();
+  let selected = 1;
+  const imgCache = new Map();
+
+  function load() {
+    try { const s = JSON.parse(localStorage.getItem(STORE)); if (s?.design?.blocks) { Object.assign(settings, s.settings || {}); return s.design; } } catch {}
+    return null;
+  }
+  function save() {
+    try { localStorage.setItem(STORE, JSON.stringify({ design, settings })); } catch {}
+  }
+
+  /* ---------- rendering ---------- */
+
+  const fillVars = (t) => t.replace(/\{date\}/g, new Date().toLocaleDateString())
+                            .replace(/\{time\}/g, new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+
+  function fontStr(b, size) { return `${b.italic ? "italic " : ""}${b.bold ? "700" : "400"} ${size}px "${b.font}"`; }
+
+  function textLayout(ctx, b, maxH, maxW) {
+    const lines = fillVars(b.text || " ").split("\n");
+    let size = b.size ? b.size : Math.ceil(maxH * 1.5);
+    for (; size > 6; size--) {
+      ctx.font = fontStr(b, size);
+      const m = lines.map((l) => ctx.measureText(l || " "));
+      const asc = m.map((x) => x.actualBoundingBoxAscent), desc = m.map((x) => x.actualBoundingBoxDescent);
+      const gap = Math.round(size * 0.18);
+      const hgt = asc.reduce((a, v, i) => a + v + desc[i], 0) + gap * (lines.length - 1);
+      const w = Math.max(...m.map((x) => x.actualBoundingBoxLeft + x.actualBoundingBoxRight));
+      if (b.size || (hgt <= maxH && (!maxW || w <= maxW))) return { size, lines, m, asc, desc, gap, w: Math.ceil(w), hgt };
+    }
+    return textLayout(ctx, { ...b, size: 6 }, maxH, maxW);
+  }
+
+  function loadImage(src) {
+    if (imgCache.has(src)) return imgCache.get(src);
+    const p = new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; });
+    imgCache.set(src, p);
+    return p;
+  }
+
+  function dither(canvas, threshold, mode) {
+    const ctx = canvas.getContext("2d"), d = ctx.getImageData(0, 0, canvas.width, canvas.height), px = d.data;
+    const W = canvas.width, g = new Float32Array(W * canvas.height);
+    for (let i = 0; i < g.length; i++) {
+      const a = px[i * 4 + 3] / 255;
+      g[i] = (0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2]) * a + 255 * (1 - a);
+    }
+    for (let i = 0; i < g.length; i++) {
+      const v = g[i] < threshold ? 0 : 255;
+      if (mode === "dither") {
+        const e = g[i] - v, x = i % W;
+        if (x + 1 < W) g[i + 1] += (e * 7) / 16;
+        if (i + W < g.length) { if (x > 0) g[i + W - 1] += (e * 3) / 16; g[i + W] += (e * 5) / 16; if (x + 1 < W) g[i + W + 1] += e / 16; }
+      }
+      px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = v; px[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(d, 0, 0);
+  }
+
+  /** Turn each block into {w, h, draw(ctx, x, y)} given the vertical room. */
+  async function measure(ctx, b, room, maxTextW) {
+    if (b.type === "text") {
+      const L = textLayout(ctx, b, room, maxTextW);
+      return { w: L.w, draw: (c, x, top) => {
+        c.font = fontStr(b, L.size); c.textBaseline = "alphabetic";
+        let y = top + (room - L.hgt) / 2;
+        L.lines.forEach((line, i) => {
+          y += L.asc[i];
+          const lw = L.m[i].actualBoundingBoxLeft + L.m[i].actualBoundingBoxRight;
+          const lx = b.align === "left" ? x : b.align === "right" ? x + L.w - lw : x + (L.w - lw) / 2;
+          c.fillText(line, lx + L.m[i].actualBoundingBoxLeft, y);
+          y += L.desc[i] + L.gap;
+        });
+      } };
+    }
+    if (b.type === "spacer") return { w: Math.round((b.mm || 3) * DOTS_PER_MM), draw: () => {} };
+    let src, w, hh, smooth = true;
+    if (b.type === "icon") {
+      src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(Graphics.iconSvg(b.name, b.invert !== !!design.label.invert));
+      hh = Math.round(room * (b.scale || 100) / 100); w = hh;
+    } else if (b.type === "image") {
+      if (!b.src) return { w: 0, draw: () => {} };
+      const im = await loadImage(b.src);
+      hh = Math.round(room * (b.scale || 100) / 100); w = Math.round((im.width / im.height) * hh);
+      const off = h("canvas", { width: w, height: hh }), oc = off.getContext("2d");
+      oc.fillStyle = "#fff"; oc.fillRect(0, 0, w, hh);
+      oc.filter = `brightness(${b.brightness || 100}%) contrast(${b.contrast || 100}%)`;
+      oc.drawImage(im, 0, 0, w, hh); oc.filter = "none";
+      dither(off, 128, b.mode || "dither");
+      if (b.invert) { oc.globalCompositeOperation = "difference"; oc.fillStyle = "#fff"; oc.fillRect(0, 0, w, hh); }
+      return { w, draw: (c, x, top) => { c.imageSmoothingEnabled = false; c.drawImage(off, x, top + (room - hh) / 2); } };
+    } else if (b.type === "qr") {
+      if (typeof qrcode === "undefined") return { w: 0, draw: () => {} };
+      const q = qrcode(0, "M"); q.addData(b.data || " "); q.make();
+      const n = q.getModuleCount(), cell = Math.max(1, Math.floor(room / n)); w = hh = n * cell; smooth = false;
+      return { w, draw: (c, x, top) => {
+        const y0 = top + Math.floor((room - hh) / 2);
+        for (let r = 0; r < n; r++) for (let k = 0; k < n; k++) if (q.isDark(r, k)) c.fillRect(x + k * cell, y0 + r * cell, cell, cell);
+      } };
+    } else if (b.type === "barcode") {
+      if (typeof JsBarcode === "undefined") return { w: 0, draw: () => {} };
+      const bc = h("canvas");
+      try {
+        JsBarcode(bc, b.data || "0", { format: b.format || "CODE128", width: 2, height: b.text ? room - 22 : room, margin: 0,
+          displayValue: !!b.text, fontSize: 18, textMargin: 2, font: "Inter", background: "#ffffff", lineColor: "#000000" });
+      } catch { return { w: 0, draw: () => {} }; }
+      const scale = Math.min(1, room / bc.height);
+      w = Math.round(bc.width * scale); hh = Math.round(bc.height * scale);
+      return { w, draw: (c, x, top) => { c.imageSmoothingEnabled = false; c.drawImage(bc, x, top + (room - hh) / 2, w, hh); } };
+    }
+    const im = await loadImage(src);
+    return { w, draw: (c, x, top) => { c.imageSmoothingEnabled = smooth; c.drawImage(im, x, top + (room - hh) / 2, w, hh); } };
+  }
+
+  async function render(canvas) {
+    const L = design.label;
+    const ctx = canvas.getContext("2d");
+    const vin = Graphics.frameVInset(L.frame);
+    const room = BAND - 2 * vin;
+    const pad = Math.round((L.pad ?? 2) * DOTS_PER_MM);
+    // Horizontal inset from the frame is only known after drawing it, so estimate with a scratch canvas.
+    const probe = h("canvas", { width: 400, height: HEAD_DOTS }).getContext("2d");
+    const inset = Graphics.drawFrame(probe, L.frame, 400, HEAD_DOTS, MARGIN);
+    const edge = pad + Math.ceil(inset);
+    const fixedW = L.lengthMode === "fixed" ? Math.round(L.length * DOTS_PER_MM) : 0;
+
+    // Measure non-text blocks first, so text can shrink to fit a fixed length.
+    const items = new Array(design.blocks.length);
+    let used = 0, texts = 0;
+    for (let i = 0; i < design.blocks.length; i++) {
+      const b = design.blocks[i];
+      if (b.type === "text") { texts++; continue; }
+      items[i] = await measure(ctx, b, room); used += items[i].w;
+    }
+    const gaps = GAP * Math.max(0, design.blocks.length - 1);
+    const textW = fixedW && texts ? Math.max(20, (fixedW - 2 * edge - used - gaps) / texts) : 0;
+    for (let i = 0; i < design.blocks.length; i++) {
+      if (design.blocks[i].type === "text") { items[i] = await measure(ctx, design.blocks[i], room, textW); used += items[i].w; }
+    }
+    const contentW = used + gaps;
+    const W = Math.max(fixedW || contentW + 2 * edge, 24);
+    canvas.width = W; canvas.height = HEAD_DOTS;
+
+    const ink = L.invert ? "#fff" : "#000", paper = L.invert ? "#000" : "#fff";
+    ctx.fillStyle = paper; ctx.fillRect(0, 0, W, HEAD_DOTS);
+    if (L.invert) { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, MARGIN - 2); ctx.fillRect(0, HEAD_DOTS - MARGIN + 2, W, MARGIN); ctx.fillStyle = "#000"; ctx.fillRect(0, MARGIN - 2, W, BAND + 4); }
+    ctx.fillStyle = ink; ctx.strokeStyle = ink;
+    Graphics.drawFrame(ctx, L.frame, W, HEAD_DOTS, MARGIN);
+    let x = fixedW ? Math.max(edge, (W - contentW) / 2) : edge;
+    const top = MARGIN + vin;
+    for (const it of items) { ctx.fillStyle = ink; it.draw(ctx, Math.round(x), top); x += it.w + GAP; }
+    dither(canvas, L.threshold || 128, "threshold");
+    return canvas;
+  }
+
+  /* ---------- printer (Web Serial over Bluetooth SPP) ---------- */
+
+  let port = null, writer = null, reader = null;
+  const status = {};
+
+  function setStatus(k, v) { status[k] = v; drawStatus(); }
+  function drawStatus() {
+    const el = $("#status");
+    el.replaceChildren();
+    const chip = (t, cls = "") => el.append(h("span", { className: "chip " + cls, textContent: t }));
+    if (!port) return chip("Not connected", "muted");
+    chip("Connected", "ok");
+    if (status.battery) chip("Battery: " + status.battery, status.battery === "low" || status.battery === "empty" ? "warn" : "");
+    if (status.paper === false) chip("No tape", "warn");
+    if (status.cover_open) chip("Cover open", "warn");
+    if (status.charging) chip("Charging");
+    if (status.firmware) chip("FW " + status.firmware, "muted");
+  }
+
+  async function connect() {
+    if (!("serial" in navigator)) {
+      toast("This browser has no Web Serial. Use desktop Chrome or Edge, or the Python CLI. You can still download the .bin.");
+      return;
+    }
+    try {
+      port = await navigator.serial.requestPort({ allowedBluetoothServiceClassIds: [P12.SPP_UUID] });
+      await port.open({ baudRate: 115200 });
+      writer = port.writable.getWriter();
+      readLoop();
+      for (const q of P12.QUERIES.handshake) await writer.write(new Uint8Array(q));
+      await writer.write(new Uint8Array(P12.QUERIES.battery));
+      await writer.write(new Uint8Array(P12.QUERIES.firmware));
+      $("#connect").textContent = "Disconnect";
+      drawStatus();
+    } catch (e) {
+      port = null; toast("Connection failed: " + e.message); drawStatus();
+    }
+  }
+
+  async function disconnect() {
+    try { reader && (await reader.cancel()); writer && writer.releaseLock(); await port.close(); } catch {}
+    port = writer = reader = null;
+    $("#connect").textContent = "Connect printer";
+    drawStatus();
+  }
+
+  async function readLoop() {
+    while (port && port.readable) {
+      reader = port.readable.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          for (const [k, v] of P12.parseStatus(value)) {
+            if (k === "print_done") toast("Printed ✓"); else setStatus(k, v);
+          }
+        }
+      } catch { break; } finally { reader.releaseLock(); }
+    }
+  }
+
+  async function makeJob() {
+    const c = await render(h("canvas"));
+    const data = c.getContext("2d").getImageData(0, 0, c.width, c.height);
+    return P12.buildJob(P12.grayFromImageData(data), c.width,
+      { copies: settings.copies, density: settings.density, mirror: settings.mirror, threshold: 128 });
+  }
+
+  async function print() {
+    if (!port) { await connect(); if (!port) return; }
+    if (status.paper === false || status.cover_open) toast("Printer reports a problem (tape or cover). Sending anyway…");
+    const job = await makeJob();
+    const btn = $("#print"); btn.disabled = true;
+    try {
+      for (let i = 0; i < job.length; i += 2048) {
+        await writer.write(job.subarray(i, i + 2048));
+        btn.textContent = `Sending ${Math.round((Math.min(job.length, i + 2048) / job.length) * 100)}%`;
+      }
+      toast(`Sent ${settings.copies} label${settings.copies > 1 ? "s" : ""}`);
+    } catch (e) { toast("Print failed: " + e.message); }
+    btn.disabled = false; btn.textContent = "Print";
+  }
+
+  /* ---------- UI ---------- */
+
+  let toastTimer;
+  function toast(msg) {
+    const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 3500);
+  }
+
+  let renderSeq = 0;
+  async function refresh() {
+    save();
+    const seq = ++renderSeq;
+    const c = await render(h("canvas"));
+    if (seq !== renderSeq) return;
+    const view = $("#preview");
+    view.width = c.width; view.height = c.height;
+    view.style.width = `${c.width * 2}px`;
+    view.getContext("2d").drawImage(c, 0, 0);
+    $("#dims").textContent = `${(c.width / DOTS_PER_MM).toFixed(1)} × 12 mm · ${c.width} × ${HEAD_DOTS} dots`;
+  }
+
+  function field(label, input) { return h("label", { className: "field" }, h("span", { textContent: label }), input); }
+  function inp(type, value, on, extra = {}) {
+    const el = h("input", { type, ...extra });
+    if (type === "checkbox") { el.checked = !!value; el.onchange = () => { on(el.checked); refresh(); }; }
+    else { el.value = value ?? ""; el.oninput = () => { on(type === "number" || type === "range" ? +el.value : el.value); refresh(); }; }
+    return el;
+  }
+  function sel(options, value, on) {
+    const el = h("select");
+    for (const o of options) el.append(h("option", { value: o.value ?? o, textContent: o.label ?? o }));
+    el.value = value; el.onchange = () => { on(el.value); refresh(); renderEditor(); };
+    return el;
+  }
+
+  function renderLabelPanel() {
+    const L = design.label, p = $("#label-panel");
+    p.replaceChildren(
+      field("Length", sel([{ value: "auto", label: "Fit content" }, { value: "fixed", label: "Fixed" }], L.lengthMode, (v) => { L.lengthMode = v; renderLabelPanel(); })),
+      ...(L.lengthMode === "fixed" ? [field("mm", inp("number", L.length, (v) => (L.length = v), { min: 5, max: 500, step: 1 }))] : []),
+      field("Side padding (mm)", inp("number", L.pad, (v) => (L.pad = v), { min: 0, max: 20, step: 0.5 })),
+      field("White on black", inp("checkbox", L.invert, (v) => (L.invert = v))),
+    );
+    const frames = $("#frames"); frames.replaceChildren();
+    for (const f of Graphics.FRAMES) {
+      const b = h("button", { className: "swatch" + (L.frame === f ? " on" : ""), title: f, type: "button" });
+      const c = h("canvas", { width: 120, height: HEAD_DOTS }), cx = c.getContext("2d");
+      cx.fillStyle = "#fff"; cx.fillRect(0, 0, 120, HEAD_DOTS); cx.fillStyle = "#000";
+      Graphics.drawFrame(cx, f, 120, HEAD_DOTS, MARGIN);
+      if (f === "none") { cx.font = "600 22px Inter"; cx.textAlign = "center"; cx.fillText("none", 60, 56); }
+      b.append(c); b.onclick = () => { L.frame = f; renderLabelPanel(); refresh(); };
+      frames.append(b);
+    }
+  }
+
+  const BLOCK_NAMES = { text: "Text", icon: "Icon", image: "Picture", qr: "QR code", barcode: "Barcode", spacer: "Space" };
+
+  function renderBlocks() {
+    const list = $("#blocks"); list.replaceChildren();
+    design.blocks.forEach((b, i) => {
+      const summary = b.type === "text" ? fillVars(b.text).replace(/\n/g, " / ") : b.type === "icon" ? b.name : b.type === "qr" || b.type === "barcode" ? b.data : b.type === "spacer" ? `${b.mm || 3} mm` : "image";
+      const row = h("div", { className: "block" + (i === selected ? " on" : "") },
+        h("button", { className: "block-main", type: "button", onclick: () => { selected = i; renderBlocks(); renderEditor(); } },
+          h("b", { textContent: BLOCK_NAMES[b.type] }), h("span", { textContent: summary })),
+        h("button", { className: "icon-btn", type: "button", title: "Move left", textContent: "↑", disabled: i === 0, onclick: () => move(i, -1) }),
+        h("button", { className: "icon-btn", type: "button", title: "Move right", textContent: "↓", disabled: i === design.blocks.length - 1, onclick: () => move(i, 1) }),
+        h("button", { className: "icon-btn", type: "button", title: "Remove", textContent: "✕", onclick: () => { design.blocks.splice(i, 1); selected = Math.min(selected, design.blocks.length - 1); renderBlocks(); renderEditor(); refresh(); } }));
+      list.append(row);
+    });
+  }
+  function move(i, d) {
+    const [b] = design.blocks.splice(i, 1); design.blocks.splice(i + d, 0, b); selected = i + d;
+    renderBlocks(); renderEditor(); refresh();
+  }
+  function add(b) { design.blocks.push(b); selected = design.blocks.length - 1; renderBlocks(); renderEditor(); refresh(); }
+
+  function renderEditor() {
+    const ed = $("#editor"), b = design.blocks[selected];
+    ed.replaceChildren();
+    if (!b) { ed.append(h("p", { className: "hint", textContent: "Add a block to start." })); return; }
+    const up = () => { renderBlocks(); };
+    if (b.type === "text") {
+      const ta = h("textarea", { rows: 3, value: b.text });
+      ta.oninput = () => { b.text = ta.value; up(); refresh(); };
+      ed.append(field("Text ({date}, {time} work too)", ta),
+        h("div", { className: "row" },
+          field("Font", sel(FONTS, b.font, (v) => (b.font = v))),
+          field("Size", sel([{ value: 0, label: "Auto" }, ...[16, 20, 24, 28, 32, 40, 48, 56, 64, 72].map((s) => ({ value: s, label: s + " px" }))], b.size || 0, (v) => (b.size = +v)))),
+        h("div", { className: "row" },
+          field("Bold", inp("checkbox", b.bold, (v) => (b.bold = v))),
+          field("Italic", inp("checkbox", b.italic, (v) => (b.italic = v))),
+          field("Align", sel(["center", "left", "right"], b.align || "center", (v) => (b.align = v)))));
+      ta.focus();
+    } else if (b.type === "icon") {
+      const grid = h("div", { className: "icons" });
+      for (const name of Object.keys(Graphics.ICONS)) {
+        const btn = h("button", { type: "button", className: "icon-pick" + (b.name === name ? " on" : ""), title: name });
+        btn.innerHTML = Graphics.iconSvg(name).replace('width="240" height="240"', 'width="28" height="28"');
+        btn.onclick = () => { b.name = name; renderEditor(); up(); refresh(); };
+        grid.append(btn);
+      }
+      ed.append(grid, h("div", { className: "row" },
+        field("Size %", inp("range", b.scale || 100, (v) => (b.scale = v), { min: 30, max: 100 })),
+        field("Inverted", inp("checkbox", b.invert, (v) => (b.invert = v)))));
+    } else if (b.type === "image") {
+      const file = h("input", { type: "file", accept: "image/*" });
+      file.onchange = () => {
+        const f = file.files[0]; if (!f) return;
+        const r = new FileReader(); r.onload = () => { b.src = r.result; refresh(); }; r.readAsDataURL(f);
+      };
+      ed.append(field("Picture or logo", file), h("div", { className: "row" },
+        field("Style", sel([{ value: "dither", label: "Photo (dither)" }, { value: "threshold", label: "Logo (sharp)" }], b.mode || "dither", (v) => (b.mode = v))),
+        field("Invert", inp("checkbox", b.invert, (v) => (b.invert = v)))),
+        field("Size %", inp("range", b.scale || 100, (v) => (b.scale = v), { min: 30, max: 100 })),
+        field("Brightness", inp("range", b.brightness || 100, (v) => (b.brightness = v), { min: 40, max: 200 })),
+        field("Contrast", inp("range", b.contrast || 100, (v) => (b.contrast = v), { min: 40, max: 300 })));
+    } else if (b.type === "qr") {
+      const ta = h("textarea", { rows: 2, value: b.data });
+      ta.oninput = () => { b.data = ta.value; up(); refresh(); };
+      const wifi = h("button", { type: "button", className: "ghost", textContent: "Wi-Fi helper…" });
+      wifi.onclick = () => {
+        const ssid = prompt("Network name (SSID)"); if (ssid == null) return;
+        const pw = prompt("Password (empty for open network)") ?? "";
+        const esc = (s) => s.replace(/([\\;,:"])/g, "\\$1");
+        b.data = `WIFI:T:${pw ? "WPA" : "nopass"};S:${esc(ssid)};P:${esc(pw)};;`; renderEditor(); up(); refresh();
+      };
+      ed.append(field("QR content (URL, text…)", ta), wifi,
+        h("p", { className: "hint", textContent: "A 12 mm tape fits roughly 40 characters before the QR modules get too small to scan." }));
+    } else if (b.type === "barcode") {
+      ed.append(field("Value", inp("text", b.data, (v) => { b.data = v; up(); })),
+        h("div", { className: "row" },
+          field("Format", sel(["CODE128", "CODE39", "EAN13", "EAN8", "UPC", "ITF14"], b.format || "CODE128", (v) => (b.format = v))),
+          field("Show text", inp("checkbox", b.text, (v) => (b.text = v)))));
+    } else if (b.type === "spacer") {
+      ed.append(field("Width (mm)", inp("number", b.mm || 3, (v) => { b.mm = v; up(); }, { min: 1, max: 100, step: 0.5 })));
+    }
+  }
+
+  function renderTemplates() {
+    const t = $("#templates"); t.replaceChildren();
+    for (const tpl of Graphics.TEMPLATES) {
+      t.append(h("button", { type: "button", className: "tpl", textContent: tpl.name, onclick: () => {
+        design = { label: { ...defaultDesign().label, ...tpl.label }, blocks: JSON.parse(JSON.stringify(tpl.blocks)) };
+        selected = design.blocks.findIndex((b) => b.type === "text"); if (selected < 0) selected = 0;
+        renderAll();
+      } }));
+    }
+  }
+
+  function renderSettings() {
+    const s = $("#print-settings");
+    s.replaceChildren(
+      field("Copies", inp("number", settings.copies, (v) => (settings.copies = Math.max(1, Math.min(99, v | 0))), { min: 1, max: 99 })),
+      field("Darkness", sel([{ value: 1, label: "Light" }, { value: 2, label: "Normal" }, { value: 4, label: "Dark" }], settings.density, (v) => (settings.density = +v))),
+      field("Mirror output", inp("checkbox", settings.mirror, (v) => (settings.mirror = v))));
+  }
+
+  function renderAll() { renderLabelPanel(); renderBlocks(); renderEditor(); renderSettings(); refresh(); }
+
+  function download(name, blob) {
+    const a = h("a", { href: URL.createObjectURL(blob), download: name }); a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function init() {
+    for (const [type, mk] of Object.entries({
+      text: () => ({ type: "text", text: "Text", font: "Inter", bold: true, italic: false, size: 0 }),
+      icon: () => ({ type: "icon", name: "star", scale: 100, invert: false }),
+      image: () => ({ type: "image", src: "", mode: "dither", scale: 100 }),
+      qr: () => ({ type: "qr", data: "https://example.com" }),
+      barcode: () => ({ type: "barcode", data: "12345678", format: "CODE128", text: true }),
+      spacer: () => ({ type: "spacer", mm: 3 }),
+    })) $("#add").append(h("button", { type: "button", className: "ghost", textContent: "+ " + BLOCK_NAMES[type], onclick: () => add(mk()) }));
+
+    $("#connect").onclick = () => (port ? disconnect() : connect());
+    $("#print").onclick = print;
+    $("#save-png").onclick = async () => { const c = await render(h("canvas")); c.toBlob((b) => download("label.png", b)); };
+    $("#save-bin").onclick = async () => download("label.bin", new Blob([await makeJob()]));
+    $("#save-json").onclick = () => download("label.json", new Blob([JSON.stringify(design, null, 2)], { type: "application/json" }));
+    $("#load-json").onchange = (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      f.text().then((t) => { try { const d = JSON.parse(t); if (d.blocks) { design = d; selected = 0; renderAll(); } } catch { toast("Not a label file"); } });
+    };
+    $("#test").onclick = () => {
+      design = { label: { ...defaultDesign().label, frame: "box" }, blocks: [{ type: "icon", name: "arrow", scale: 100 }, { type: "text", text: "TEST Fg 123", font: "Inter", bold: true, size: 0 }] };
+      selected = 1; renderAll();
+      toast("If the printed arrow points the wrong way or the text is mirrored, toggle “Mirror output”.");
+    };
+    if (navigator.serial) navigator.serial.addEventListener("disconnect", (e) => { if (e.target === port) disconnect(); });
+    if (!("serial" in navigator)) $("#no-serial").hidden = false;
+    renderTemplates(); drawStatus();
+    document.fonts.ready.then(renderAll);
+    Promise.all(FONTS.map((f) => document.fonts.load(`700 40px "${f}"`).catch(() => {}))).then(refresh);
+    renderAll();
+  }
+
+  init();
+})();
