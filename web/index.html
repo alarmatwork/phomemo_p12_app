@@ -72,7 +72,9 @@ textarea { resize: vertical; }
 .icon-btn { width: 34px; padding: 0; }
 #add { display: flex; flex-wrap: wrap; gap: 6px; }
 #add button { font-size: 13px; padding: 5px 9px; }
-.icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: 6px; margin-bottom: 12px; }
+.icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: 6px; margin-bottom: 12px; max-height: 260px; overflow-y: auto; padding: 2px; }
+.icon-search { width: 100%; margin-bottom: 8px; }
+.icon-pick[hidden] { display: none; }
 .icon-pick { padding: 5px; background: #fff; line-height: 0; }
 .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
 #no-serial { border-color: var(--warn); }

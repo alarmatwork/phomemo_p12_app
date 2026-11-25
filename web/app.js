@@ -25,6 +25,7 @@
   let design = load() || defaultDesign();
   let selected = 1;
   const imgCache = new Map();
+  let iconQuery = "";
 
   function load() {
     try { const s = JSON.parse(localStorage.getItem(STORE)); if (s?.design?.blocks) { if (s.settings?.v === 2) Object.assign(settings, s.settings); else if (s.settings) Object.assign(settings, { copies: s.settings.copies ?? 1, density: s.settings.density ?? 2 }); return s.design; } } catch {}
@@ -428,13 +429,24 @@
       ta.focus();
     } else if (b.type === "icon") {
       const grid = h("div", { className: "icons" });
+      const search = h("input", { type: "search", placeholder: `Search ${Object.keys(Graphics.ICONS).length} icons (food, tools, pet…)`, className: "icon-search", value: iconQuery });
+      const filter = () => {
+        const q = search.value.trim().toLowerCase();
+        iconQuery = search.value;
+        for (const btn of grid.children) {
+          const hay = btn.title + " " + (Graphics.ICON_TAGS[btn.title] || "");
+          btn.hidden = !!q && !q.split(/\s+/).every((w) => hay.includes(w));
+        }
+      };
+      search.oninput = filter;
       for (const name of Object.keys(Graphics.ICONS)) {
         const btn = h("button", { type: "button", className: "icon-pick" + (b.name === name ? " on" : ""), title: name });
         btn.innerHTML = Graphics.iconSvg(name).replace('width="240" height="240"', 'width="28" height="28"');
         btn.onclick = () => { b.name = name; renderEditor(); up(); refresh(); };
         grid.append(btn);
       }
-      ed.append(grid, h("div", { className: "row" },
+      filter();
+      ed.append(search, grid, h("div", { className: "row" },
         field("Size %", inp("range", b.scale || 100, (v) => (b.scale = v), { min: 30, max: 100 })),
         field("Inverted", inp("checkbox", b.invert, (v) => (b.invert = v)))));
     } else if (b.type === "image") {
