@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from PIL import Image, ImageOps
@@ -32,10 +33,30 @@ def main(argv=None):
 
     sub.add_parser("status", help="query battery, paper, firmware")
 
+    sv = sub.add_parser("serve", help="web designer + print API (Docker/NAS)")
+    sv.add_argument("--host", default="0.0.0.0")
+    sv.add_argument("--port", type=int, default=8080)
+
+    br = sub.add_parser("bridge", help="relay TCP to the printer (run on a Bluetooth-capable box)")
+    br.add_argument("--host", default="0.0.0.0")
+    br.add_argument("--port", type=int, default=9100)
+
     a = ap.parse_args(argv)
 
     if a.cmd == "status":
         return status(a.printer)
+    if a.cmd == "serve":
+        from .server import serve
+        serve(a.host, a.port, a.printer or os.environ.get("PRINTER") or None)
+        return 0
+    if a.cmd == "bridge":
+        from .server import bridge
+        target = a.printer or os.environ.get("PRINTER")
+        if not target:
+            print("--printer (or PRINTER env) is required", file=sys.stderr)
+            return 1
+        bridge(a.host, a.port, target)
+        return 0
 
     if a.label:
         img = Image.open(a.label).convert("L")

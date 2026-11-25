@@ -180,6 +180,7 @@
   /* ---------- printer (Web Serial over Bluetooth SPP) ---------- */
 
   let port = null, writer = null, reader = null;
+  let nas = null;   // {target} when served by the NAS container with a printer configured
   const status = {};
 
   function setStatus(k, v) { status[k] = v; drawStatus(); }
@@ -187,8 +188,9 @@
     const el = $("#status");
     el.replaceChildren();
     const chip = (t, cls = "") => el.append(h("span", { className: "chip " + cls, textContent: t }));
-    if (!port) return chip("Not connected", "muted");
-    chip("Connected", "ok");
+    if (nas) chip(status.error ? "NAS: printer unreachable" : "NAS printer", status.error ? "warn" : "ok");
+    else if (!port) return chip("Not connected", "muted");
+    else chip("Connected", "ok");
     if (status.battery) chip("Battery: " + status.battery, status.battery === "low" || status.battery === "empty" ? "warn" : "");
     if (status.paper === false) chip("No tape", "warn");
     if (status.cover_open) chip("Cover open", "warn");
@@ -245,7 +247,34 @@
       { copies: settings.copies, density: settings.density, mirror: settings.mirror, threshold: 128 });
   }
 
+  async function nasStatus() {
+    $("#connect").disabled = true;
+    try {
+      const r = await fetch("api/status", { cache: "no-store" });
+      const j = await r.json();
+      for (const k of Object.keys(status)) delete status[k];
+      if (!r.ok) status.error = j.error || r.statusText; else Object.assign(status, j);
+      if (status.error) toast("Printer: " + status.error);
+    } catch (e) { status.error = e.message; }
+    $("#connect").disabled = false;
+    drawStatus();
+  }
+
+  async function nasPrint(job) {
+    const btn = $("#print"); btn.disabled = true; btn.textContent = "Printing…";
+    try {
+      const r = await fetch("api/print", { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: job });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      delete status.error;
+      for (const [k, v] of Object.entries(j.events || {})) if (k !== "print_done") status[k] = v;
+      toast(`Sent ${settings.copies} label${settings.copies > 1 ? "s" : ""} via NAS`);
+    } catch (e) { status.error = e.message; toast("Print failed: " + e.message); }
+    btn.disabled = false; btn.textContent = "Print"; drawStatus();
+  }
+
   async function print() {
+    if (nas && !port) return nasPrint(await makeJob());
     if (!port) { await connect(); if (!port) return; }
     if (status.paper === false || status.cover_open) toast("Printer reports a problem (tape or cover). Sending anyway…");
     const job = await makeJob();
@@ -434,7 +463,12 @@
       spacer: () => ({ type: "spacer", mm: 3 }),
     })) $("#add").append(h("button", { type: "button", className: "ghost", textContent: "+ " + BLOCK_NAMES[type], onclick: () => add(mk()) }));
 
-    $("#connect").onclick = () => (port ? disconnect() : connect());
+    $("#connect").onclick = () => (nas && !port ? nasStatus() : port ? disconnect() : connect());
+    fetch("api/info", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((info) => {
+      if (!info?.printer) return;
+      nas = info; $("#connect").textContent = "Check printer"; $("#no-serial").hidden = true; drawStatus();
+      nasStatus();
+    }).catch(() => {});
     $("#print").onclick = print;
     $("#save-png").onclick = async () => { const c = await render(h("canvas")); c.toBlob((b) => download("label.png", b)); };
     $("#save-bin").onclick = async () => download("label.bin", new Blob([await makeJob()]));

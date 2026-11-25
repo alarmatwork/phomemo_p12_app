@@ -1,5 +1,7 @@
-"""Connections to a paired P12: Linux RFCOMM socket, or a serial port (Windows COMx,
-macOS /dev/cu.*, Linux /dev/rfcommN)."""
+"""Connections to a paired P12. A target can be:
+  AA:BB:CC:DD:EE:FF  Linux RFCOMM socket (host needs a Bluetooth stack)
+  tcp://host:port    a TCP bridge in front of the printer (see `python -m p12 bridge`)
+  COM5, /dev/...     a serial port (Windows COMx, macOS /dev/cu.*, Linux /dev/rfcommN)"""
 from __future__ import annotations
 
 import re
@@ -19,6 +21,10 @@ class Connection:
             s.settimeout(timeout)
             s.connect((target, channel))
             self._sock, self._ser = s, None
+        elif target.startswith("tcp://"):
+            host, _, port = target[6:].rpartition(":")
+            self._sock = socket.create_connection((host, int(port or 9100)), timeout=timeout)
+            self._ser = None
         else:
             import serial  # pyserial
             self._sock, self._ser = None, serial.Serial(target, 115200, timeout=0.2, write_timeout=30)

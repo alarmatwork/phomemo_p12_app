@@ -1,0 +1,24 @@
+services:
+  p12:
+    build: .
+    image: p12-label-studio
+    container_name: p12-label-studio
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Option A (recommended): a Wi-Fi bridge next to the printer. See bridges/.
+      PRINTER: "tcp://192.168.1.50:9100"
+
+  # Option B: USB Bluetooth dongle in the NAS. This only works if the NAS kernel has
+  # bluetooth/btusb/rfcomm modules (stock Synology DSM 7 does not). Replace the
+  # service above with this one and pair the printer on the host first.
+  #
+  # p12:
+  #   build: .
+  #   container_name: p12-label-studio
+  #   restart: unless-stopped
+  #   network_mode: host          # RFCOMM sockets live in the host network namespace
+  #   cap_add: [NET_ADMIN, NET_RAW]
+  #   environment:
+  #     PRINTER: "AA:BB:CC:DD:EE:FF"

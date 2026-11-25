@@ -41,6 +41,28 @@ python3 -m venv .venv && .venv/bin/pip install pillow pyserial qrcode
 .venv/bin/python -m p12 print "Test" --preview out.png --dump out.bin   # no printer needed
 ```
 
+## 2c. Docker on a NAS
+
+The container serves the designer on port 8080. When `PRINTER` is set, **Print** goes through the NAS,
+so any phone, tablet or browser on your network can print. If it isn't set, browsers fall back to Web Serial.
+
+```bash
+docker compose up -d --build        # then open http://nas-ip:8080
+```
+
+The NAS still has to reach the printer over **Bluetooth Classic**. Choose one route:
+
+| route | `PRINTER=` | notes |
+|---|---|---|
+| **ESP32 bridge** (recommended, about €5) | `tcp://esp32-ip:9100` | Flash [bridges/esp32/p12_bridge.ino](bridges/esp32/p12_bridge.ino). Must be an **original ESP32**; S2/S3/C3 have no Classic BT. |
+| **Raspberry Pi bridge** | `tcp://pi-ip:9100` | On the Pi: `bluetoothctl pair <MAC>`, then `python -m p12 -p <MAC> bridge` |
+| **USB BT dongle in the NAS** | `AA:BB:CC:DD:EE:FF` | Only if the NAS kernel has `bluetooth`/`btusb`/`rfcomm` modules; stock Synology DSM 7 doesn't. Use the host-network service in `docker-compose.yml`. |
+
+Home Assistant / ESPHome "Bluetooth proxies" do **not** work here: they are BLE-only, and the P12 uses Classic SPP.
+
+API: `GET /api/info`, `GET /api/status`, and `POST /api/print` with raw job bytes
+(`python -m p12 print ... --dump job.bin`, then `curl --data-binary @job.bin nas:8080/api/print`).
+
 ## Tests
 
 ```bash

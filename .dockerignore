@@ -1,0 +1,7 @@
+.venv
+.git
+tests
+bridges
+docs
+**/__pycache__
+*.bin
