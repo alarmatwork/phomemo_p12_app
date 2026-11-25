@@ -20,7 +20,8 @@
              { type: "text", text: "Hello P12", font: "Inter", bold: true, italic: false, size: 0 }],
   });
   // v2: orientation fixed after a real-P12 test print, so an older saved "mirror" is reset.
-  const settings = { v: 2, copies: 1, density: 2, mirror: false, feed: P12.TAIL_FEED_MM, offset: 0 };
+  // Vertical offset 6: measured with the calibration strip on a P12 Pro (tape sits ~6 dots low).
+  const settings = { v: 3, copies: 1, density: 2, mirror: false, feed: P12.TAIL_FEED_MM, offset: 6 };
 
   let design = load() || defaultDesign();
   let selected = 1;
@@ -28,7 +29,7 @@
   let iconQuery = "";
 
   function load() {
-    try { const s = JSON.parse(localStorage.getItem(STORE)); if (s?.design?.blocks) { if (s.settings?.v === 2) Object.assign(settings, s.settings); else if (s.settings) Object.assign(settings, { copies: s.settings.copies ?? 1, density: s.settings.density ?? 2 }); return s.design; } } catch {}
+    try { const s = JSON.parse(localStorage.getItem(STORE)); if (s?.design?.blocks) { if (s.settings?.v === 3) Object.assign(settings, s.settings); else if (s.settings?.v === 2) Object.assign(settings, s.settings, { v: 3, offset: s.settings.offset || 6 }); else if (s.settings) Object.assign(settings, { copies: s.settings.copies ?? 1, density: s.settings.density ?? 2 }); return s.design; } } catch {}
     return null;
   }
   function save() {

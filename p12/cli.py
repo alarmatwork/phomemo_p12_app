@@ -30,8 +30,9 @@ def main(argv=None):
     pr.add_argument("--mirror", action="store_true", help="flip if your output comes out mirrored")
     pr.add_argument("--feed", type=float, default=protocol.TAIL_FEED_MM,
                     help="blank tape after each label in mm (default %(default)s)")
-    pr.add_argument("--offset", type=int, default=0,
-                    help="move content down (+) or up (-) by this many dots, from the calibration print")
+    pr.add_argument("--offset", type=int, default=6,
+                    help="move content down (+) or up (-) by this many dots; 6 fits a P12 Pro "
+                         "(check with the web app's calibration print)")
     pr.add_argument("--preview", help="save preview PNG here instead of / as well as printing")
     pr.add_argument("--dump", help="write raw printer bytes to this file")
 
