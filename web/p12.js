@@ -9,7 +9,7 @@
   /** gray(x, y) -> 0..255 for a W x 96 landscape label. Returns the GS v 0 raster command.
    *  raster[r][c] = label[c][W-1-r] (verified on a real P12), then feedMm of blank rows
    *  so the end of the label clears the tear edge. */
-  function rasterCommand(gray, width, { mirror = false, threshold = 128, feedMm = TAIL_FEED_MM } = {}) {
+  function rasterCommand(gray, width, { mirror = false, threshold = 128, feedMm = TAIL_FEED_MM, offset = 0 } = {}) {
     const rowBytes = HEAD_DOTS / 8;
     const rows = width + Math.max(0, Math.round(feedMm * DOTS_PER_MM));
     const out = new Uint8Array(8 + rowBytes * rows);
@@ -21,7 +21,8 @@
         for (let bit = 0; bit < 8; bit++) {
           let c = b * 8 + bit;
           if (mirror) c = HEAD_DOTS - 1 - c;
-          v = (v << 1) | (gray(width - 1 - r, c) < threshold ? 1 : 0);
+          const y = c - offset;  // offset > 0 moves content down the label
+          v = (v << 1) | (y >= 0 && y < HEAD_DOTS && gray(width - 1 - r, y) < threshold ? 1 : 0);
         }
         out[i++] = v;
       }
@@ -29,8 +30,8 @@
     return out;
   }
 
-  function buildJob(gray, width, { copies = 1, density = 0, mirror = false, threshold = 128, feedMm = TAIL_FEED_MM } = {}) {
-    const img = rasterCommand(gray, width, { mirror, threshold, feedMm });
+  function buildJob(gray, width, { copies = 1, density = 0, mirror = false, threshold = 128, feedMm = TAIL_FEED_MM, offset = 0 } = {}) {
+    const img = rasterCommand(gray, width, { mirror, threshold, feedMm, offset });
     const head = [];
     if (density) head.push(0x1f, 0x11, 0x02, density);
     head.push(0x1b, 0x40);

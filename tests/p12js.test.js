@@ -11,7 +11,7 @@ const px = Array.from({ length: W * 96 }, rnd);
 const gray = (x, y) => px[y * W + x];
 
 for (const mirror of [false, true]) {
-  const js = Buffer.from(P12.buildJob(gray, W, { copies: 2, density: 2, mirror, feedMm: 3 }));
+  const js = Buffer.from(P12.buildJob(gray, W, { copies: 2, density: 2, mirror, feedMm: 3, offset: mirror ? -5 : 7 }));
   const py = execFileSync(path.join(__dirname, "..", ".venv", "bin", "python"), ["-I", "-c", `
 import sys, json
 sys.path.insert(0, ${JSON.stringify(path.join(__dirname, ".."))})
@@ -19,7 +19,7 @@ from PIL import Image
 from p12 import protocol
 px = json.loads(sys.stdin.read())
 im = Image.new("L", (${W}, 96)); im.putdata(px)
-sys.stdout.buffer.write(protocol.build_job(im, copies=2, density=2, mirror=${mirror ? "True" : "False"}, feed_mm=3))
+sys.stdout.buffer.write(protocol.build_job(im, copies=2, density=2, mirror=${mirror ? "True" : "False"}, feed_mm=3, offset=${mirror ? -5 : 7}))
 `], { input: JSON.stringify(px) });
   assert.deepStrictEqual(js, py, `JS and Python jobs differ (mirror=${mirror})`);
 }

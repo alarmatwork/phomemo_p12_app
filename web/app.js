@@ -20,7 +20,7 @@
              { type: "text", text: "Hello P12", font: "Inter", bold: true, italic: false, size: 0 }],
   });
   // v2: orientation fixed after a real-P12 test print, so an older saved "mirror" is reset.
-  const settings = { v: 2, copies: 1, density: 2, mirror: false, feed: P12.TAIL_FEED_MM };
+  const settings = { v: 2, copies: 1, density: 2, mirror: false, feed: P12.TAIL_FEED_MM, offset: 0 };
 
   let design = load() || defaultDesign();
   let selected = 1;
@@ -283,11 +283,30 @@
     }
   }
 
-  async function makeJob() {
-    const c = await render(h("canvas"));
+  /** Test pattern: a staircase of 12 numbered 8-dot bands (1 = top of the label, 12 = bottom)
+   *  plus edge ticks, so a print shows exactly which head rows land on the tape. */
+  function calibrationCanvas() {
+    const step = 30, W = 12 * step + 40;
+    const c = h("canvas", { width: W, height: HEAD_DOTS }), g = c.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, W, HEAD_DOTS);
+    g.fillStyle = "#000";
+    for (let i = 0; i < 12; i++) {
+      g.fillRect(i * step, i * 8, step - 2, 8);
+      g.fillStyle = "#fff"; g.font = "bold 8px sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillText(String(i + 1), i * step + (step - 2) / 2, i * 8 + 4.5);
+      g.fillStyle = "#000";
+    }
+    for (let y = 0; y < HEAD_DOTS; y += 8) g.fillRect(W - 36, y, y % 24 === 0 ? 14 : 8, 1);  // ruler ticks
+    g.fillRect(W - 20, 0, 4, HEAD_DOTS / 2);  // top half bar
+    g.fillRect(W - 10, HEAD_DOTS / 2, 4, HEAD_DOTS / 2);  // bottom half bar
+    return c;
+  }
+
+  async function makeJob(canvas) {
+    const c = canvas || await render(h("canvas"));
     const data = c.getContext("2d").getImageData(0, 0, c.width, c.height);
     return P12.buildJob(P12.grayFromImageData(data), c.width,
-      { copies: settings.copies, density: settings.density, mirror: settings.mirror, threshold: 128, feedMm: settings.feed });
+      { copies: canvas ? 1 : settings.copies, density: settings.density, mirror: settings.mirror, threshold: 128, feedMm: settings.feed, offset: settings.offset | 0 });
   }
 
   async function nasStatus() {
@@ -316,11 +335,12 @@
     btn.disabled = false; btn.textContent = "Print"; drawStatus();
   }
 
-  async function print() {
-    if (nas && !port) return nasPrint(await makeJob());
+  async function print(canvas) {
+    if (canvas instanceof Event) canvas = undefined;
+    if (nas && !port) return nasPrint(await makeJob(canvas));
     if (!port) { log("print: not connected, connecting first"); await connect(); if (!port) return; }
     if (status.paper === false || status.cover_open) toast("Printer reports a problem (tape or cover). Sending anyway…");
-    const job = await makeJob();
+    const job = await makeJob(canvas);
     const btn = $("#print"); btn.disabled = true;
     log("print: sending", job.length, "bytes", { copies: settings.copies, density: settings.density, mirror: settings.mirror, feedMm: settings.feed }, "start:", hex(job));
     try {
@@ -499,6 +519,7 @@
     s.replaceChildren(
       field("Copies", inp("number", settings.copies, (v) => (settings.copies = Math.max(1, Math.min(99, v | 0))), { min: 1, max: 99 })),
       field("Darkness", sel([{ value: 1, label: "Light" }, { value: 2, label: "Normal" }, { value: 4, label: "Dark" }], settings.density, (v) => (settings.density = +v))),
+      field("Vertical offset (dots)", inp("number", settings.offset, (v) => (settings.offset = Math.max(-24, Math.min(24, v | 0))), { min: -24, max: 24, step: 1 })),
       field("Feed after label (mm)", inp("number", settings.feed, (v) => (settings.feed = Math.max(0, Math.min(30, +v || 0))), { min: 0, max: 30, step: 1 })),
       field("Mirror output", inp("checkbox", settings.mirror, (v) => (settings.mirror = v))));
   }
@@ -533,6 +554,10 @@
     $("#load-json").onchange = (e) => {
       const f = e.target.files[0]; if (!f) return;
       f.text().then((t) => { try { const d = JSON.parse(t); if (d.blocks) { design = d; selected = 0; renderAll(); } } catch { toast("Not a label file"); } });
+    };
+    $("#calibrate").onclick = () => {
+      toast("Printing calibration strip: steps 1 (top) to 12 (bottom). Count which steps you can see.");
+      print(calibrationCanvas());
     };
     $("#test").onclick = () => {
       design = { label: { ...defaultDesign().label, frame: "box" }, blocks: [{ type: "icon", name: "arrow", scale: 100 }, { type: "text", text: "TEST Fg 123", font: "Inter", bold: true, size: 0 }] };

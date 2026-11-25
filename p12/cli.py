@@ -30,6 +30,8 @@ def main(argv=None):
     pr.add_argument("--mirror", action="store_true", help="flip if your output comes out mirrored")
     pr.add_argument("--feed", type=float, default=protocol.TAIL_FEED_MM,
                     help="blank tape after each label in mm (default %(default)s)")
+    pr.add_argument("--offset", type=int, default=0,
+                    help="move content down (+) or up (-) by this many dots, from the calibration print")
     pr.add_argument("--preview", help="save preview PNG here instead of / as well as printing")
     pr.add_argument("--dump", help="write raw printer bytes to this file")
 
@@ -73,7 +75,7 @@ def main(argv=None):
     if a.preview:
         img.save(a.preview)
         print(f"preview: {a.preview} ({img.width / protocol.DOTS_PER_MM:.0f} mm)")
-    job = protocol.build_job(img, a.copies, protocol.DENSITY.get(a.density), a.mirror, feed_mm=a.feed)
+    job = protocol.build_job(img, a.copies, protocol.DENSITY.get(a.density), a.mirror, feed_mm=a.feed, offset=a.offset)
     if a.dump:
         open(a.dump, "wb").write(job)
         print(f"wrote {len(job)} bytes to {a.dump}")

@@ -36,7 +36,7 @@ def set_density(level: int) -> bytes:
     return bytes([0x1F, 0x11, 0x02, level])
 
 
-def label_to_raster(label: Image.Image, mirror: bool = False) -> Image.Image:
+def label_to_raster(label: Image.Image, mirror: bool = False, offset: int = 0) -> Image.Image:
     """Convert a W x 96 label image (landscape, as you read it) into the 96-px-wide
     raster the head prints. The right end of the label is printed first.
     raster[r][c] = label[c][W-1-r], verified on a real P12. (The literal decompiled app
@@ -45,6 +45,10 @@ def label_to_raster(label: Image.Image, mirror: bool = False) -> Image.Image:
     img = label.convert("L")
     if img.height != HEAD_DOTS:
         raise ValueError(f"label must be {HEAD_DOTS} px tall, got {img.height}")
+    if offset:  # > 0 moves content down the label (calibrates where the tape sits under the head)
+        shifted = Image.new("L", img.size, 255)
+        shifted.paste(img, (0, offset))
+        img = shifted
     raster = img.transpose(Image.Transpose.ROTATE_90)
     if mirror:
         raster = raster.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
@@ -79,14 +83,14 @@ def raster_command(raster: Image.Image, threshold: int = 128) -> bytes:
 
 def build_job(label: Image.Image, copies: int = 1, density: int | None = None,
               mirror: bool = False, threshold: int = 128,
-              feed_mm: float = TAIL_FEED_MM) -> bytes:
+              feed_mm: float = TAIL_FEED_MM, offset: int = 0) -> bytes:
     """Full byte stream for printing `label` (W x 96, landscape) `copies` times,
     each followed by `feed_mm` of blank tape so the label clears the tear edge."""
     job = bytearray()
     if density:
         job += set_density(density)
     job += INIT
-    raster = label_to_raster(label, mirror)
+    raster = label_to_raster(label, mirror, offset)
     feed = max(0, round(feed_mm * DOTS_PER_MM))
     if feed:
         padded = Image.new("L", (raster.width, raster.height + feed), 255)
