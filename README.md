@@ -26,8 +26,9 @@ Open `web/index.html` in **desktop Chrome or Edge**. You can open it straight fr
 * Without Web Serial (Safari, Firefox, some phones), use **Download .bin** or **Save PNG** and print them
   with the CLI.
 
-> **First print:** press **Orientation test** and print it. If the arrow or text comes out mirrored, tick
-> **Mirror output**. The app's decompiled code was ambiguous about one flip.
+> **First print:** the orientation was confirmed on a real P12, and each label is followed by 8 mm of
+> blank tape so its end clears the tear edge. If your text comes out mirrored, tick **Mirror output**;
+> if the end is still cut off, raise **Feed after label**.
 
 ## 2b. Python CLI (`p12/`)
 

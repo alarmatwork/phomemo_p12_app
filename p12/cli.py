@@ -28,6 +28,8 @@ def main(argv=None):
     pr.add_argument("--copies", type=int, default=1)
     pr.add_argument("--density", choices=list(protocol.DENSITY), help="print darkness")
     pr.add_argument("--mirror", action="store_true", help="flip if your output comes out mirrored")
+    pr.add_argument("--feed", type=float, default=protocol.TAIL_FEED_MM,
+                    help="blank tape after each label in mm (default %(default)s)")
     pr.add_argument("--preview", help="save preview PNG here instead of / as well as printing")
     pr.add_argument("--dump", help="write raw printer bytes to this file")
 
@@ -71,7 +73,7 @@ def main(argv=None):
     if a.preview:
         img.save(a.preview)
         print(f"preview: {a.preview} ({img.width / protocol.DOTS_PER_MM:.0f} mm)")
-    job = protocol.build_job(img, a.copies, protocol.DENSITY.get(a.density), a.mirror)
+    job = protocol.build_job(img, a.copies, protocol.DENSITY.get(a.density), a.mirror, feed_mm=a.feed)
     if a.dump:
         open(a.dump, "wb").write(job)
         print(f"wrote {len(job)} bytes to {a.dump}")
@@ -92,12 +94,21 @@ def status(target: str | None):
         print("--printer is required", file=sys.stderr)
         return 1
     from .transport import Connection
+    got = 0
     with Connection(target) as c:
+        print(f"connected to {target}, querying...", flush=True)
         for q in (*protocol.CONNECT_HANDSHAKE, protocol.GET_BATTERY, protocol.GET_FIRMWARE):
             c.write(q)
             raw = c.read(0.6)
+            got += len(raw)
+            if raw:
+                print(f"  sent {q.hex(' ')}  got {raw.hex(' ')}")
             for ev in protocol.parse_status(raw):
                 print(f"{ev[0]:12} {ev[1]}")
+    if not got:
+        print("no reply from the printer: the port opened, but nothing came back. Is the printer on,\n"
+              "and not connected to a phone or another program?", file=sys.stderr)
+        return 2
     return 0
 
 

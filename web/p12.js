@@ -3,14 +3,17 @@
 (function (root) {
   const HEAD_DOTS = 96;
   const DOTS_PER_MM = 8;
+  const TAIL_FEED_MM = 8;
   const SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb";
 
   /** gray(x, y) -> 0..255 for a W x 96 landscape label. Returns the GS v 0 raster command.
-   *  Transform = app's rotate 90 / mirror / rotate 180: raster[r][c] = label[95-c][W-1-r]. */
-  function rasterCommand(gray, width, { mirror = false, threshold = 128 } = {}) {
+   *  raster[r][c] = label[c][W-1-r] (verified on a real P12), then feedMm of blank rows
+   *  so the end of the label clears the tear edge. */
+  function rasterCommand(gray, width, { mirror = false, threshold = 128, feedMm = TAIL_FEED_MM } = {}) {
     const rowBytes = HEAD_DOTS / 8;
-    const out = new Uint8Array(8 + rowBytes * width);
-    out.set([0x1d, 0x76, 0x30, 0x00, rowBytes, 0, width & 0xff, (width >> 8) & 0xff]);
+    const rows = width + Math.max(0, Math.round(feedMm * DOTS_PER_MM));
+    const out = new Uint8Array(8 + rowBytes * rows);
+    out.set([0x1d, 0x76, 0x30, 0x00, rowBytes, 0, rows & 0xff, (rows >> 8) & 0xff]);
     let i = 8;
     for (let r = 0; r < width; r++) {
       for (let b = 0; b < rowBytes; b++) {
@@ -18,7 +21,7 @@
         for (let bit = 0; bit < 8; bit++) {
           let c = b * 8 + bit;
           if (mirror) c = HEAD_DOTS - 1 - c;
-          v = (v << 1) | (gray(width - 1 - r, HEAD_DOTS - 1 - c) < threshold ? 1 : 0);
+          v = (v << 1) | (gray(width - 1 - r, c) < threshold ? 1 : 0);
         }
         out[i++] = v;
       }
@@ -26,8 +29,8 @@
     return out;
   }
 
-  function buildJob(gray, width, { copies = 1, density = 0, mirror = false, threshold = 128 } = {}) {
-    const img = rasterCommand(gray, width, { mirror, threshold });
+  function buildJob(gray, width, { copies = 1, density = 0, mirror = false, threshold = 128, feedMm = TAIL_FEED_MM } = {}) {
+    const img = rasterCommand(gray, width, { mirror, threshold, feedMm });
     const head = [];
     if (density) head.push(0x1f, 0x11, 0x02, density);
     head.push(0x1b, 0x40);
@@ -49,6 +52,7 @@
     };
   }
 
+  // P12 reports a level code; P12 Pro reports a percentage (0..100).
   const BATTERY = { 0xa1: "full", 0xa2: "medium", 0xa3: "low", 0xa4: "empty" };
 
   function parseStatus(bytes) {
@@ -57,7 +61,7 @@
     while (i < bytes.length) {
       if ((bytes[i] !== 0x1a && bytes[i] !== 0x1b) || i + 1 >= bytes.length) { i++; continue; }
       const cmd = bytes[i + 1], arg = bytes[i + 2];
-      if (cmd === 0x04 && arg !== undefined) { ev.push(["battery", BATTERY[arg] || arg]); i += 3; }
+      if (cmd === 0x04 && arg !== undefined) { ev.push(["battery", BATTERY[arg] || (arg <= 100 ? arg + "%" : "0x" + arg.toString(16))]); i += 3; }
       else if (cmd === 0x06 && arg !== undefined) { ev.push(["paper", arg !== 0x88]); i += 3; }
       else if (cmd === 0x05 && arg !== undefined) { ev.push(["cover_open", arg === 0x99]); i += 3; }
       else if (cmd === 0x03 && arg !== undefined) { ev.push(["charging", arg === 0xa9]); i += 3; }
@@ -76,7 +80,7 @@
     firmware: [0x1f, 0x11, 0x07],
   };
 
-  const api = { HEAD_DOTS, DOTS_PER_MM, SPP_UUID, rasterCommand, buildJob, grayFromImageData, parseStatus, QUERIES };
+  const api = { HEAD_DOTS, DOTS_PER_MM, TAIL_FEED_MM, SPP_UUID, rasterCommand, buildJob, grayFromImageData, parseStatus, QUERIES };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.P12 = api;
 })(typeof window !== "undefined" ? window : globalThis);

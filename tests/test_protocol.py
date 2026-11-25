@@ -21,10 +21,22 @@ def random_label(w=40):
     return im
 
 
-def test_transform_matches_app():
+def test_transform_is_app_pipeline_unmirrored():
+    # The literal app steps printed mirrored on a real P12; the fix flips across the tape.
     lab = random_label()
-    assert list(protocol.label_to_raster(lab).getdata()) == list(app_pipeline(lab).getdata())
+    fixed = app_pipeline(lab).transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    assert list(protocol.label_to_raster(lab).getdata()) == list(fixed.getdata())
+    assert list(protocol.label_to_raster(lab, mirror=True).getdata()) == list(app_pipeline(lab).getdata())
     assert protocol.label_to_raster(lab).size == (96, 40)
+
+
+def test_tail_feed_is_blank_rows_after_image():
+    lab = Image.new("L", (10, 96), 0)
+    job = protocol.build_job(lab, feed_mm=2)
+    rows = 10 + 16
+    assert job[2:10] == bytes([0x1D, 0x76, 0x30, 0x00, 12, 0, rows, 0])
+    data = job[10:]
+    assert data[:12 * 10] == b"\xff" * 120 and data[12 * 10:] == bytes(12 * 16)
 
 
 def test_pack_bits_msb_first():
@@ -36,7 +48,7 @@ def test_pack_bits_msb_first():
 
 def test_job_layout():
     lab = Image.new("L", (300, 96), 255)
-    job = protocol.build_job(lab, copies=2, density=2)
+    job = protocol.build_job(lab, copies=2, density=2, feed_mm=0)
     assert job[:4] == bytes([0x1F, 0x11, 0x02, 2])
     assert job[4:6] == bytes([0x1B, 0x40])
     header = bytes([0x1D, 0x76, 0x30, 0x00, 12, 0, 300 & 0xFF, 300 >> 8])
@@ -49,6 +61,7 @@ def test_job_layout():
 def test_parse_status():
     ev = protocol.parse_status(bytes([0x1A, 0x04, 0xA2, 0x1A, 0x06, 0x88, 0x1A, 0x07, 1, 2, 3, 0x1A, 0x0F, 0x0C]))
     assert ev == [("battery", "medium"), ("paper", False), ("firmware", "1.2.3"), ("print_done", True)]
+    assert protocol.parse_status(bytes([0x1A, 0x04, 0x53])) == [("battery", "83%")]  # P12 Pro
 
 
 def test_compose_sizes():

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- label printer: tape coming out of the top of a rounded body -->
+  <rect x="14" y="4" width="36" height="26" rx="2" fill="#ffffff" stroke="#1b1f1c" stroke-width="3"/>
+  <rect x="20" y="11" width="6" height="12" rx="1" fill="#1b1f1c"/>
+  <rect x="29" y="11" width="15" height="4" rx="1" fill="#1b1f1c"/>
+  <rect x="29" y="19" width="10" height="4" rx="1" fill="#1b1f1c"/>
+  <rect x="4" y="24" width="56" height="36" rx="10" fill="#4fb39a" stroke="#1b1f1c" stroke-width="3"/>
+  <rect x="12" y="23" width="40" height="5" rx="2" fill="#1b1f1c"/>
+  <circle cx="48" cy="45" r="5" fill="#ffffff" stroke="#1b1f1c" stroke-width="2.5"/>
+  <rect x="12" y="41" width="22" height="3" rx="1.5" fill="#1b1f1c" opacity=".55"/>
+  <rect x="12" y="48" width="16" height="3" rx="1.5" fill="#1b1f1c" opacity=".55"/>
+</svg>

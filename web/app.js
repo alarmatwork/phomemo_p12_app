@@ -19,14 +19,15 @@
     blocks: [{ type: "icon", name: "heart", scale: 100, invert: false },
              { type: "text", text: "Hello P12", font: "Inter", bold: true, italic: false, size: 0 }],
   });
-  const settings = { copies: 1, density: 2, mirror: false };
+  // v2: orientation fixed after a real-P12 test print, so an older saved "mirror" is reset.
+  const settings = { v: 2, copies: 1, density: 2, mirror: false, feed: P12.TAIL_FEED_MM };
 
   let design = load() || defaultDesign();
   let selected = 1;
   const imgCache = new Map();
 
   function load() {
-    try { const s = JSON.parse(localStorage.getItem(STORE)); if (s?.design?.blocks) { Object.assign(settings, s.settings || {}); return s.design; } } catch {}
+    try { const s = JSON.parse(localStorage.getItem(STORE)); if (s?.design?.blocks) { if (s.settings?.v === 2) Object.assign(settings, s.settings); else if (s.settings) Object.assign(settings, { copies: s.settings.copies ?? 1, density: s.settings.density ?? 2 }); return s.design; } } catch {}
     return null;
   }
   function save() {
@@ -191,11 +192,20 @@
     if (nas) chip(status.error ? "NAS: printer unreachable" : "NAS printer", status.error ? "warn" : "ok");
     else if (!port) return chip("Not connected", "muted");
     else chip("Connected", "ok");
-    if (status.battery) chip("Battery: " + status.battery, status.battery === "low" || status.battery === "empty" ? "warn" : "");
+    if (status.battery) chip("Battery: " + status.battery, status.battery === "low" || status.battery === "empty" || parseInt(status.battery) <= 15 ? "warn" : "");
     if (status.paper === false) chip("No tape", "warn");
     if (status.cover_open) chip("Cover open", "warn");
     if (status.charging) chip("Charging");
     if (status.firmware) chip("FW " + status.firmware, "muted");
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const log = (...a) => console.info("[P12]", ...a);
+  const hex = (u8) => Array.from(u8.slice(0, 32), (b) => b.toString(16).padStart(2, "0")).join(" ") + (u8.length > 32 ? " …" : "");
+  function write(bytes, ms = 10000) {
+    let t;
+    const timeout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error("printer did not accept data within " + ms / 1000 + " s (off, asleep or connected elsewhere?)")), ms); });
+    return Promise.race([writer.write(bytes), timeout]).finally(() => clearTimeout(t));
   }
 
   async function connect() {
@@ -204,23 +214,54 @@
       return;
     }
     try {
-      port = await navigator.serial.requestPort({ allowedBluetoothServiceClassIds: [P12.SPP_UUID] });
-      await port.open({ baudRate: 115200 });
+      const chosen = await navigator.serial.requestPort({ allowedBluetoothServiceClassIds: [P12.SPP_UUID] });
+      const info = chosen.getInfo();
+      log("port chosen", info);
+      if (port) await disconnect();  // the read loop stops once `port` is cleared
+      if (chosen.readable || chosen.writable) {
+        // Left open by an earlier connection on this page (e.g. after a stuck print): reset it.
+        log("port was still open, closing it first");
+        await closePort(chosen);
+      }
+      port = chosen;
+      await port.open({ baudRate: 115200, flowControl: "none" });
+      log("port opened");
+      // Like pyserial (which gets replies on macOS cu.* ports): raise DTR/RTS, then pace the queries.
+      try { await port.setSignals({ dataTerminalReady: true, requestToSend: true }); } catch (e) { log("setSignals", e); }
       writer = port.writable.getWriter();
       readLoop();
-      for (const q of P12.QUERIES.handshake) await writer.write(new Uint8Array(q));
-      await writer.write(new Uint8Array(P12.QUERIES.battery));
-      await writer.write(new Uint8Array(P12.QUERIES.firmware));
+      await sleep(300);
+      for (const q of [...P12.QUERIES.handshake, P12.QUERIES.battery, P12.QUERIES.firmware]) {
+        await write(new Uint8Array(q));
+        await sleep(250);
+      }
+      log("handshake sent, waiting for replies");
       $("#connect").textContent = "Disconnect";
       drawStatus();
     } catch (e) {
-      port = null; toast("Connection failed: " + e.message); drawStatus();
+      log("connect failed", e);
+      const p = port; port = null;
+      if (p) await closePort(p);
+      $("#connect").textContent = "Connect printer";
+      toast("Connection failed: " + e.message + (/Mac/.test(navigator.platform) ? " Try the other entry for the printer (with or without “cu.”)." : "")); drawStatus();
     }
   }
 
+  async function closePort(p) {
+    // abort() drops pending writes, so a stuck print can't keep the port locked open.
+    try { if (writer) await writer.abort(); } catch (e) { log("writer abort", e); }
+    try { if (reader) await reader.cancel(); } catch (e) { log("reader cancel", e); }
+    writer = reader = null;
+    try { if (p.writable && !p.writable.locked) await p.writable.abort(); } catch {}
+    try { if (p.readable && !p.readable.locked) await p.readable.cancel(); } catch {}
+    if (!p.readable && !p.writable) return;  // never opened, or already closed
+    try { await p.close(); log("port closed"); } catch (e) { log("port close", e); }
+  }
+
   async function disconnect() {
-    try { reader && (await reader.cancel()); writer && writer.releaseLock(); await port.close(); } catch {}
-    port = writer = reader = null;
+    const p = port;
+    port = null;
+    if (p) await closePort(p);
     $("#connect").textContent = "Connect printer";
     drawStatus();
   }
@@ -232,11 +273,12 @@
         for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
+          log("printer replied", hex(value), P12.parseStatus(value));
           for (const [k, v] of P12.parseStatus(value)) {
             if (k === "print_done") toast("Printed ✓"); else setStatus(k, v);
           }
         }
-      } catch { break; } finally { reader.releaseLock(); }
+      } catch (e) { log("read stopped", e); break; } finally { reader.releaseLock(); }
     }
   }
 
@@ -244,7 +286,7 @@
     const c = await render(h("canvas"));
     const data = c.getContext("2d").getImageData(0, 0, c.width, c.height);
     return P12.buildJob(P12.grayFromImageData(data), c.width,
-      { copies: settings.copies, density: settings.density, mirror: settings.mirror, threshold: 128 });
+      { copies: settings.copies, density: settings.density, mirror: settings.mirror, threshold: 128, feedMm: settings.feed });
   }
 
   async function nasStatus() {
@@ -275,17 +317,19 @@
 
   async function print() {
     if (nas && !port) return nasPrint(await makeJob());
-    if (!port) { await connect(); if (!port) return; }
+    if (!port) { log("print: not connected, connecting first"); await connect(); if (!port) return; }
     if (status.paper === false || status.cover_open) toast("Printer reports a problem (tape or cover). Sending anyway…");
     const job = await makeJob();
     const btn = $("#print"); btn.disabled = true;
+    log("print: sending", job.length, "bytes", { copies: settings.copies, density: settings.density, mirror: settings.mirror, feedMm: settings.feed }, "start:", hex(job));
     try {
       for (let i = 0; i < job.length; i += 2048) {
-        await writer.write(job.subarray(i, i + 2048));
+        await write(job.subarray(i, i + 2048));
         btn.textContent = `Sending ${Math.round((Math.min(job.length, i + 2048) / job.length) * 100)}%`;
       }
+      log("print: all bytes written");
       toast(`Sent ${settings.copies} label${settings.copies > 1 ? "s" : ""}`);
-    } catch (e) { toast("Print failed: " + e.message); }
+    } catch (e) { log("print failed", e); toast("Print failed: " + e.message); await disconnect(); }
     btn.disabled = false; btn.textContent = "Print";
   }
 
@@ -443,6 +487,7 @@
     s.replaceChildren(
       field("Copies", inp("number", settings.copies, (v) => (settings.copies = Math.max(1, Math.min(99, v | 0))), { min: 1, max: 99 })),
       field("Darkness", sel([{ value: 1, label: "Light" }, { value: 2, label: "Normal" }, { value: 4, label: "Dark" }], settings.density, (v) => (settings.density = +v))),
+      field("Feed after label (mm)", inp("number", settings.feed, (v) => (settings.feed = Math.max(0, Math.min(30, +v || 0))), { min: 0, max: 30, step: 1 })),
       field("Mirror output", inp("checkbox", settings.mirror, (v) => (settings.mirror = v))));
   }
 
@@ -480,7 +525,7 @@
     $("#test").onclick = () => {
       design = { label: { ...defaultDesign().label, frame: "box" }, blocks: [{ type: "icon", name: "arrow", scale: 100 }, { type: "text", text: "TEST Fg 123", font: "Inter", bold: true, size: 0 }] };
       selected = 1; renderAll();
-      toast("If the printed arrow points the wrong way or the text is mirrored, toggle “Mirror output”.");
+      toast("Text should read normally. If it comes out mirrored, tick “Mirror output”; if the end is cut off, raise “Feed after label”.");
     };
     if (navigator.serial) navigator.serial.addEventListener("disconnect", (e) => { if (e.target === port) disconnect(); });
     if (!("serial" in navigator)) $("#no-serial").hidden = false;

@@ -14,6 +14,7 @@ import json
 import os
 import socket
 import threading
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,6 +52,11 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         if self.path.startswith("/api/"):
             super().log_message(fmt, *args)
+
+    def end_headers(self):
+        if not self.path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-cache")  # revalidate so updates show up at once
+        super().end_headers()
 
     def _json(self, code: int, obj) -> None:
         body = json.dumps(obj).encode()
@@ -98,30 +104,70 @@ def serve(host: str, port: int, printer: str | None) -> None:
 
 
 def bridge(listen_host: str, listen_port: int, printer: str) -> None:
-    """Relay one TCP client at a time to the printer, in both directions."""
+    """Relay TCP clients (one at a time) to the printer, in both directions.
+
+    The printer connection is opened once and kept open across clients: on macOS, closing a
+    Bluetooth cu.* port leaves the P12 Pro stuck (it ignores new sessions until re-paired)."""
     srv = socket.create_server((listen_host, listen_port), reuse_port=False)
     print(f"bridge tcp://{listen_host}:{listen_port} -> {printer}", flush=True)
+    state = {"dev": None, "client": None}
+    dev_lock = threading.Lock()
+
+    def device() -> Connection:
+        with dev_lock:
+            if state["dev"] is None:
+                state["dev"] = Connection(printer)
+                print("printer connection opened (kept open)", flush=True)
+            return state["dev"]
+
+    def drop_device(err: Exception) -> None:
+        with dev_lock:
+            print("printer connection lost:", err, flush=True)
+            try:
+                state["dev"] and state["dev"].close()
+            except Exception:  # noqa: BLE001
+                pass
+            state["dev"] = None
+
+    def pump_replies() -> None:
+        while True:
+            dev = state["dev"]
+            if dev is None:
+                time.sleep(0.2)
+                continue
+            try:
+                data = dev.read(0.3)
+            except Exception as e:  # noqa: BLE001
+                drop_device(e)
+                continue
+            if data:
+                print("printer ->", data.hex(" "), flush=True)
+                client = state["client"]
+                if client:
+                    try:
+                        client.sendall(data)
+                    except OSError:
+                        pass
+
+    threading.Thread(target=pump_replies, daemon=True).start()
+    try:
+        device()
+    except Exception as e:  # noqa: BLE001
+        print("printer not reachable yet:", e, flush=True)
+
     while True:
         client, addr = srv.accept()
         print("client", addr, flush=True)
+        state["client"] = client
         try:
-            with client, Connection(printer) as dev:
-                stop = threading.Event()
-
-                def up():
-                    while not stop.is_set():
-                        data = dev.read(0.3)
-                        if data:
-                            try:
-                                client.sendall(data)
-                            except OSError:
-                                break
-
-                t = threading.Thread(target=up, daemon=True)
-                t.start()
+            with client:
                 while chunk := client.recv(65536):
-                    dev.write(chunk)
-                stop.set()
-                t.join(1)
+                    try:
+                        device().write(chunk)
+                    except Exception as e:  # noqa: BLE001
+                        drop_device(e)
+                        device().write(chunk)  # one retry on a fresh connection
         except Exception as e:  # noqa: BLE001
             print("bridge error:", e, flush=True)
+        finally:
+            state["client"] = None

@@ -25,6 +25,10 @@ CONNECT_HANDSHAKE = [
 
 DENSITY = {"light": 1, "normal": 2, "dark": 4}
 
+# The last ~8 mm printed are still between the head and the tear edge when printing stops,
+# so blank tape is fed after each label (measured on a real P12).
+TAIL_FEED_MM = 8
+
 
 def set_density(level: int) -> bytes:
     if not 1 <= level <= 15:
@@ -34,14 +38,14 @@ def set_density(level: int) -> bytes:
 
 def label_to_raster(label: Image.Image, mirror: bool = False) -> Image.Image:
     """Convert a W x 96 label image (landscape, as you read it) into the 96-px-wide
-    raster the head prints, using the same transform as the official app
-    (rotate 90, mirror, rotate 180, which is a transpose about the anti-diagonal).
-    Set mirror=True if your prints come out mirrored."""
+    raster the head prints. The right end of the label is printed first.
+    raster[r][c] = label[c][W-1-r], verified on a real P12. (The literal decompiled app
+    steps give a transpose about the anti-diagonal, which prints mirrored on hardware.)
+    mirror=True flips across the tape, for printers that behave differently."""
     img = label.convert("L")
     if img.height != HEAD_DOTS:
         raise ValueError(f"label must be {HEAD_DOTS} px tall, got {img.height}")
-    # raster[r][c] = label[95-c][W-1-r]
-    raster = img.transpose(Image.Transpose.TRANSVERSE)
+    raster = img.transpose(Image.Transpose.ROTATE_90)
     if mirror:
         raster = raster.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
     return raster
@@ -74,13 +78,21 @@ def raster_command(raster: Image.Image, threshold: int = 128) -> bytes:
 
 
 def build_job(label: Image.Image, copies: int = 1, density: int | None = None,
-              mirror: bool = False, threshold: int = 128) -> bytes:
-    """Full byte stream for printing `label` (W x 96, landscape) `copies` times."""
+              mirror: bool = False, threshold: int = 128,
+              feed_mm: float = TAIL_FEED_MM) -> bytes:
+    """Full byte stream for printing `label` (W x 96, landscape) `copies` times,
+    each followed by `feed_mm` of blank tape so the label clears the tear edge."""
     job = bytearray()
     if density:
         job += set_density(density)
     job += INIT
-    img = raster_command(label_to_raster(label, mirror), threshold)
+    raster = label_to_raster(label, mirror)
+    feed = max(0, round(feed_mm * DOTS_PER_MM))
+    if feed:
+        padded = Image.new("L", (raster.width, raster.height + feed), 255)
+        padded.paste(raster, (0, 0))
+        raster = padded
+    img = raster_command(raster, threshold)
     for _ in range(max(1, copies)):
         job += img
     return bytes(job)
@@ -97,7 +109,9 @@ def parse_status(data: bytes) -> list[tuple[str, object]]:
         cmd = data[i + 1]
         arg = data[i + 2] if i + 2 < len(data) else None
         if cmd == 0x04 and arg is not None:
-            events.append(("battery", {0xA1: "full", 0xA2: "medium", 0xA3: "low", 0xA4: "empty"}.get(arg, hex(arg))))
+            # P12 sends a level code, P12 Pro a percentage.
+            levels = {0xA1: "full", 0xA2: "medium", 0xA3: "low", 0xA4: "empty"}
+            events.append(("battery", levels.get(arg, f"{arg}%" if arg <= 100 else hex(arg))))
             i += 3
         elif cmd == 0x06 and arg is not None:
             events.append(("paper", arg != 0x88))

@@ -36,8 +36,9 @@ Relevant decompiled classes: `printer.P12Printer`, `P1000Printer`, `QuinPrinter`
 The resulting raster is **96 px wide** (12 bytes per row) and **W rows tall**.
 Steps 2 and 3 together amount to: `raster[row r][col c] = label[y = 95 - c][x = W - 1 - r]`.
 That means the right end of the label is printed first. The decompiler left the mirror
-step's control flow partly mangled, so both tools have a "mirror" switch in case the output
-comes out flipped.
+step's control flow partly mangled, and on a real P12 that literal transform printed **mirrored**.
+The tools therefore use `raster[r][c] = label[y = c][x = W - 1 - r]` (PIL `ROTATE_90`); the
+"mirror" switch brings back the literal transform.
 
 ## Print job (P12)
 
@@ -48,7 +49,9 @@ for each copy:
                                          w = bytes per row (12), h = rows
 ```
 
-Unlike the P1000, the P12 sends no `ESC J n` feed after the image.
+Unlike the P1000, the P12 sends no `ESC J n` feed after the image. On real hardware the last
+~8 mm printed are still behind the tear edge when printing stops (and come out as blank leader
+on the next label), so these tools append 8 mm (64 rows) of blank raster to every image.
 
 ## Commands sent on connect (P12)
 
