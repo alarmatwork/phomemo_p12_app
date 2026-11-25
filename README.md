@@ -55,7 +55,7 @@ The NAS still has to reach the printer over **Bluetooth Classic**. Choose one ro
 
 | route | `PRINTER=` | notes |
 |---|---|---|
-| **ESP32 bridge** (recommended, about €5) | `tcp://esp32-ip:9100` | Flash [bridges/esp32/p12_bridge.ino](bridges/esp32/p12_bridge.ino). Must be an **original ESP32**; S2/S3/C3 have no Classic BT. |
+| **ESP32 bridge** (recommended, about €5) | `tcp://esp32-ip:9100` | Flash [bridges/esp32](bridges/esp32/README.md). Must be an **original ESP32** (e.g. M5Stack ATOM Lite); S2/S3/C3 have no Classic BT. |
 | **Raspberry Pi bridge** | `tcp://pi-ip:9100` | On the Pi: `bluetoothctl pair <MAC>`, then `python -m p12 -p <MAC> bridge` |
 | **USB BT dongle in the NAS** | `AA:BB:CC:DD:EE:FF` | Only if the NAS kernel has `bluetooth`/`btusb`/`rfcomm` modules; stock Synology DSM 7 doesn't. Use the host-network service in `docker-compose.yml`. |
 
