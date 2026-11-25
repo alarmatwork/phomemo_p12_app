@@ -67,7 +67,7 @@ void setup() {
   led(0, 0, 30);
 
   prefs.begin("p12", false);
-  printerStr = prefs.getString("mac", DEFAULT_PRINTER);
+  printerStr = prefs.isKey("mac") ? prefs.getString("mac") : String(DEFAULT_PRINTER);
 
   WiFiManager wm;
   WiFiManagerParameter macParam("mac", "Printer Bluetooth address", printerStr.c_str(), 17);
@@ -91,7 +91,8 @@ void setup() {
   }
   if (!parseMac(printerStr, printerMac)) parseMac(DEFAULT_PRINTER, printerMac);
 
-  WiFi.setSleep(false);
+  // Do NOT call WiFi.setSleep(false): with Bluetooth running, Wi-Fi modem sleep is required for
+  // radio coexistence and esp_bt_controller_enable() aborts without it.
   MDNS.begin(HOSTNAME);
   MDNS.addService("p12", "tcp", TCP_PORT);
   Serial.printf("Wi-Fi ok: bridge at tcp://%s:%u (%s.local)\n", WiFi.localIP().toString().c_str(), TCP_PORT, HOSTNAME);
